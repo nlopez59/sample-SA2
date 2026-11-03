@@ -1,0 +1,44 @@
+name: zDeploy
+description: Execute Wazi Deploy generate and deploy phases via SSH
+
+inputs:
+  # Connection Details
+  zOS:      { description: 'SSH userid and zOS host', required: true }
+  zProfile: { description: 'USS profile command', required: true }
+  zDO:      { description: 'zDevOps configuration directory', required: true }
+  
+  # Artifactory Configuration ($vars)
+  myArt_PAT:      { description: 'Artifactory Access Token', required: true }
+  Art_URL:        { description: 'Artifactory base URL', required: true }
+  Art_App_Repo:   { description: 'Artifactory Repo', required: true }
+  gp_Trace:       { description: 'Trace level', default: '0' }
+  
+  # WaziDeploy Configuration ($vars)
+  wdg_in_Method:      { description: 'Method YAML path', required: true }
+  wdg_out_Plan:       { description: 'Plan output name', required: true }
+  wdg_out_PlanReport: { description: 'Plan report output name', required: true }
+
+  wdd_in_Target_ZOS_Env: { description: 'Target ZOS env file', required: true }
+  wdd_out_Evidence:      { description: 'Evidence filename', required: true }
+
+runs:
+  using: composite
+  steps:
+    ### 1. Download the Latest Package and pass its filename ($env.LATEST_PACKAGE) to the generate and deploy steps. 
+    - name: 1-Get Latest Package
+      shell: powershell
+      run: |
+        $pkg = (ssh ${{inputs.zOS}} '${{inputs.zProfile}}; cd ${{env.workSpace}}/${{env.appDirName}}; ${{inputs.zDO}}/scripts/getLatestPackage.sh ${{inputs.myArt_PAT}} ${{inputs.Art_URL}} ${{env.Art_App_Repo}} ${{inputs.gp_Trace}}' | Select-String '^Latest_Package=').Line
+        $pkg >> $env:GITHUB_ENV
+
+    ### 2. Generate Deployment Plan from the method 
+    - name: 2-Generate
+      shell: powershell
+      run: |
+        ssh ${{inputs.zOS}} '${{inputs.zProfile}}; cd ${{env.workSpace}}/${{env.appDirName}}; . /global/opt/pyenv/gdp/bin/activate; wazideploy-generate --deploymentMethod ${{inputs.zDO}}${{inputs.wdg_in_Method}} --packageInputFile ${{env.LATEST_PACKAGE}} --deploymentPlan ${{inputs.wdg_out_Plan}} --deploymentPlanReport ${{inputs.wdg_out_PlanReport}} --workingFolder . ; deactivate'
+
+    ### 3. Deploy the latest package using the plan and zOS env file 
+    - name: 3-Deploy
+      shell: powershell
+      run: |
+        ssh ${{inputs.zOS}} '${{inputs.zProfile}}; cd ${{env.workSpace}}/${{env.appDirName}}; . /global/opt/pyenv/gdp/bin/activate; wazideploy-deploy --envFile ${{inputs.zDO}}/deploy/${{env.wdd_in_App_Target_ZOS_Env}} --packageInputFile ${{env.LATEST_PACKAGE}} --deploymentPlan ${{inputs.wdg_out_Plan}} --evidencesFileName ${{inputs.wdd_out_Evidence}} --workingFolder . ; deactivate'

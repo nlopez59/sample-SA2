@@ -1,0 +1,38 @@
+name: 'Gather Logs and Audits'
+description: 'Uploads build artifacts and executes zOS audit scripts for Git and Build reports'
+
+inputs:
+  # Org or repo level vars common across all applications.   
+  zOS:  
+    description: SSH userid and zOS host
+    required: true
+  
+  zProfile:
+    description: USS profile command
+    required: true
+  
+  zDO: 
+    description: zDevOps configuration directory
+    required: true
+
+  wdd_out_Evidence:      { description: 'Evidence filename', required: true }
+
+
+runs:
+  using: "composite"
+  steps:
+    # Show Git diff log
+    - name: Audit Trail - Git Log
+      shell: powershell
+      run:   ssh ${{inputs.zOS}} '${{inputs.zProfile}}; cd ${{env.workSpace}}/${{env.appDirName}}; echo Git Log for branch ${{github.ref_name}}; git log -1 ${{github.sha}} --pretty=format:"SHA=%H%nSHORT=%h%nSUBJECT=%s%n" --stat'
+
+    # Show DBB build Rpt 
+    - name: Audit Trail - zBuild Report
+      shell: powershell
+      run:   ssh ${{inputs.zOS}} '${{inputs.zProfile}}; cd ${{env.workSpace}}/${{env.appDirName}}; python ${{inputs.zDO}}/scripts/auditDbbRpt.py logs/BuildReport.json'
+
+    # Show Wazi Deploy Rpt (Py version beta v1)   
+    - name: Audit Trail - Deploy Report           
+      shell: powershell
+      run:   ssh ${{inputs.zOS}} '${{inputs.zProfile}}; cd ${{env.workSpace}}/${{env.appDirName}}; python ${{inputs.zDO}}/scripts/auditDeployRpt.py ./${{inputs.wdd_out_Evidence}}'
+

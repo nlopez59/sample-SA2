@@ -1,0 +1,18 @@
+name: zCodeScan
+description: Run IBM Static Source Code Scanner on the Windows Runner
+
+runs:
+  using: composite
+  steps:
+    - name: Run zCodeScan
+      shell: powershell
+      run: |
+        $ErrorActionPreference = 'Stop'
+        Set-Location -Path ".."
+        python -m venv C:\opt\pyenv\zcodescan
+        & C:\opt\pyenv\zcodescan\Scripts\activate.ps1
+        zcodescan -sfl "zdevops\${{env.edtLogs}}\buildList_utf8.txt" -cf "zdevops\conf\zcodescan\config.yml" -of output.yml -e utf-8 -et sonarqube -ef IBM_CodeScan.json
+        $ZCS_RC = $LASTEXITCODE
+        Write-Host "zCodeScan returned $ZCS_RC"
+        if ($ZCS_RC -gt 4) { throw "zCodeScan failed with exit code $ZCS_RC" }
+        exit 0

@@ -1,0 +1,133 @@
+name: zOS_GitHub_Release     
+  # This workflow demonstrates a generic Wazi-Deploy Release using GutHub Rlease packages to a target zOS env like QA, UAT or PROD.
+  
+  # Enterprise GitHub users should use the "Environment" variable as an approval gate when deploying to protected environments.
+  # A user provided target zOS env and package ver# drive the deployment process.  
+  # Note: The github "GH" and Git-bash (for easier multi-line run cmds) cli`s are required on the runner    
+
+#env:      
+ 
+  
+# this 'on' trigger enables a manual start 
+on: 
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Enter 'latest' or a specific release tag"
+        default:  'latest'
+        required: true
+
+      environment:
+        description: "Enter the target env for Wazi Deploy"
+        default: QA
+        type: choice
+        options:
+          - Dev
+          - QA
+          - UAT
+          - Prod
+        required: true
+
+
+jobs:
+  deploy:
+    name: Promote Release   
+    runs-on: self-hosted   
+    timeout-minutes: 15   
+    
+    # envs are protected  resource in GH and only admin have privileges to run a this workflow
+    environment:
+      name:     ${{ inputs.environment }}
+      
+    
+
+
+    permissions:
+      contents: read
+
+    steps:
+
+      - name: Determine Release
+        id: release
+        shell: bash
+        
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+
+          if [ "${{ inputs.release }}" = "latest" ]; then
+
+            RELEASE=$(gh release view \
+              --repo "${{ github.repository }}" \
+              --json tagName \
+              --jq '.tagName')
+
+            echo "Using latest release: $RELEASE"
+
+          else
+
+            RELEASE="${{ inputs.release }}"
+
+            echo "Using specified release: $RELEASE"
+
+          fi
+
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
+      - name: Display Promotion Request
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "Release Promotion"
+          echo "======================================"
+          echo "Release     : ${{ steps.release.outputs.release }}"
+          echo "Environment : ${{ inputs.environment }}"
+          echo "======================================"
+      - name: Download Release Package
+        shell: bash
+
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+
+          mkdir -p release
+
+          gh release download \
+            "${{ steps.release.outputs.release }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "package.tar" \
+            --dir release \
+            --clobber
+
+          echo "Downloaded package:"
+          ls -lh release/package.tar
+
+          echo "Package contents:"
+          tar -tvf release/package.tar
+      - name: Copy Package to z/OS
+        shell: bash
+        run: |
+          scp release/package.tar ${{vars.zOS}}:/tmp/release-package.tar
+     
+      ### Generate Deployment Plan from the method 
+      - name: 2-Generate
+        shell: bash 
+        run: |
+          ssh ${{vars.zOS}} "
+              ${{vars.zProfile}} 
+              cd /tmp            
+              . /global/opt/pyenv/gdp/bin/activate
+              wazideploy-generate --deploymentMethod ${{vars.zDO}}${{vars.wdg_in_Method}} --packageInputFile release-package.tar --deploymentPlan ${{vars.wdg_out_Plan}} --deploymentPlanReport ${{vars.wdg_out_PlanReport}} --workingFolder . 
+              deactivate"
+
+
+
+      ### Deploy the latest package using the plan and zOS env file 
+      - name: 3-Deploy
+        shell: bash
+        run: |
+          ssh ${{vars.zOS}} "
+              ${{vars.zProfile}}           
+              cd /tmp
+              . /global/opt/pyenv/gdp/bin/activate
+              wazideploy-deploy --envFile ${{vars.zDO}}/deploy/${{inputs.environment}}-zOS-GHR.env  --packageInputFile release-package.tar --deploymentPlan ${{vars.wdg_out_Plan}} --evidencesFileName ${{vars.wdd_out_Evidence}} --workingFolder . 
+              deactivate"

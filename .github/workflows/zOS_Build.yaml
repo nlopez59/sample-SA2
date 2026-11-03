@@ -1,0 +1,122 @@
+name: zOS_DevSecOps
+# IBM provided MVP GitHub Actions workflow for zOS DevSecOps Admins (Jan 2026)
+# >>> WIP  <<<  chg'd workspace to DBB term appDir major impact... testing 
+
+
+# Global App specific Env Vars
+env:
+  myRepoURL:  git@github.com:${{github.repository}}.git       # App repo URL in SSH format for zOS clone  
+  CommonURL:  'git@github.com:nlopez59/Common.git'            # URL of a Common repo of share copybooks 
+
+  jobLogs:    'jobLogs_${{github.run_number}}'                # Dir for edt-cli artifacts 
+  
+  Art_App_Repo: "sys-dat-team-base-generic-local"             # Artifact folder used in dbb-app.yaml package task (DBB 3.0.5+)
+  wdd_in_App_Target_ZOS_Env: "Dev-zOS.env"                    # App zOS target env file (DB2, CICS, Loadlibs ...) 
+
+  # These 2 vars reflect DBB's pre-defined vars. Together they form DBB's $APP_DIR Var   
+  # https://www.ibm.com/docs/en/adffz/dbb/3.0.x?topic=reference-predefined-variables   
+  workSpace:  '/tmp/_zBuilds/Build_${{github.run_number}}'    # Path for clones, artifacts, logs. 
+  appDirName: 'zdevops'                                       # App dir name - aka Repo root dir  
+
+permissions:
+  contents: write
+  
+on: [workflow_dispatch,push]
+
+jobs:
+
+  zBuild:
+    # Runs zBuild only when the commit message does NOT start with 'doc'.
+    # If skipped, dependent jobs in the 'needs: zBuild' chain are also skipped.    
+    if: github.event.head_commit.message && startsWith(github.event.head_commit.message, 'doc') == false
+
+    runs-on: [self-hosted, Windows]                   # a self-hosted windows runner using powershell  
+    timeout-minutes: 15                               # "The operation was canceled." when the job exceed this period.
+    steps:       
+      - name: Checkout code
+        uses: actions/checkout@v5                     # repo checkout in the runner for composite actions scripts nad zCodeScan
+
+      - name: zBuild Pipeline
+        uses: ./.github/actions/zBuild
+
+        # WITH: variables passed to composite action.yaml scripts 
+        # $var are global in scope and defined in GitHub → Repo → Settings → Secrets and variables → Actions → Variables 
+        # Note: $var.<?> appear upper case (not sure why) in GitHUb UI. But they were entered as shown below. 
+        # Example: https://github.com/nlopez59/zdevops/settings/variables/actions
+        with:
+          zOS:      ${{vars.zOS}}              
+          zProfile: ${{vars.zProfile}}
+          zDO:      ${{vars.zDO}}
+
+  Quality_Gate_zCodeScan:
+      needs: zBuild
+      runs-on: [self-hosted, Windows]
+      steps:        
+        - name: Run zCodeScan
+          uses: ./.github/actions/zCodeScan
+
+  Quality_Gate_zCodeCoverage:
+    needs: zBuild
+    runs-on: [self-hosted, Windows]    
+
+    steps:
+      # - name: Init workspace for IBM Code Coverage
+      #    run: ssh ${{vars.zOS}} "if [ -d ${{vars.ccwkDir}} ] && [ ${{vars.ccwkDir}} != / ] ; then rm -fr ${{vars.ccwkDir}}; fi"
+     
+      - name: Execute TAZ/EDT Unit Tests and Generate Code Coverage Reports   
+        run:  ssh ${{vars.zOS}} '${{vars.zProfile}}; export RUNNER_WORKDIR=${{env.workSpace}}; python ${{vars.zDO}}/scripts/dbb2edt-cli/dbb2edt_runner.py ibmuser.zbuilder ${{env.appDirName}} ${{env.appDirName}}/logs/buildList.txt'
+
+
+      - name: Pull EDT and Code Coverage logs from USS
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{env.jobLogs}}" | Out-Null
+          scp -r "${{vars.zOS}}:${{env.workSpace}}/dbb2edt_runner_logs/." "${{env.jobLogs}}"
+          Write-Host "IBM EDT and Code Coverage reports are saved in this pipeline artifacts link"
+
+      - name: Upload EDT and Code Coverage logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: edt-coverage-logs-${{ github.run_number }}
+          path: jobLogs_${{ github.run_number }}
+          if-no-files-found: warn
+
+  Deploy:
+    needs: [Quality_Gate_zCodeScan, Quality_Gate_zCodeCoverage]
+    runs-on: [self-hosted, Windows]
+    
+    steps:
+       - name: Run Wazi Deploy
+         uses: ./.github/actions/zDeploy
+         with:
+           zOS:       ${{ vars.zOS }}
+           zProfile:  ${{ vars.zProfile }}
+           zDO:       ${{ vars.zDO }}
+
+           myArt_PAT:          ${{secrets.myArt_PAT}} 
+           Art_URL:            ${{vars.Art_URL}} 
+           gp_Trace:           ${{vars.gp_Trace}} 
+           
+           wdg_out_Plan:       ${{vars.wdg_out_Plan}}      
+           wdg_in_Method:      ${{vars.wdg_in_Method}}     
+           wdg_out_PlanReport: ${{vars.wdg_out_PlanReport}}
+
+           wdd_out_Evidence:   ${{vars.wdd_out_Evidence}}
+ 
+  Gather_Logs_and_Audits:
+    needs: [zBuild, Quality_Gate_zCodeScan, Deploy, Quality_Gate_zCodeCoverage]
+    # if: github.event.head_commit.message && !startsWith(github.event.head_commit.message, 'doc')
+    if: ${{ always() && github.event.head_commit.message && !startsWith(github.event.head_commit.message, 'doc') }}
+
+  
+    runs-on: [self-hosted, Windows]
+    steps:  
+      - name: Run Audit Action
+        uses: ./.github/actions/audit
+        with:
+          zOS:      ${{vars.zOS}}          
+          zProfile: ${{vars.zProfile}}
+          zDO:      ${{vars.zDO}}
+          wdd_out_Evidence:   ${{vars.wdd_out_Evidence}}
+  

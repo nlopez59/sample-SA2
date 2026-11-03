@@ -1,0 +1,145 @@
+name: zBuild Pipeline
+description: Init USS, clone repo, build with DBB and stage logs
+
+# Notes:  DEFER DBB Headless fails. using a depth of 3 in the cline to speed up my demo.  Not recommended in real world as DBB may a deeper history during impact analysis 
+
+inputs:
+  # Declare Global (Org/Repo) variables that are passed into this action.
+  # These are referenced by the action as ${{ inputs.<name> }}.
+  # Workflow-level $env.* variables do not need to be declared here.
+  zOS:  
+    description: SSH userid and zOS host
+    required: true
+  
+  zProfile:
+    description: USS profile command
+    required: true
+  
+  zDO: 
+    description: zDevOps configuration directory
+    required: true
+
+  token:
+    description: GitHub token used to publish the release
+    required: true
+
+ 
+
+runs:
+  # Define this as a composite action with its steps 
+  using: composite
+  steps:
+
+    - name: Init Runner and zDevOps test script env var
+      shell: powershell
+      run: |
+        Get-ChildItem -Path "jobLogs_*" -Directory | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -Path "${{env.jobLogs}}" -ItemType Directory -Force | Out-Null
+
+    - name: Init USS workSpace and logs
+      shell: powershell
+      run: ssh ${{inputs.zOS}} 'ls -t /tmp/_zBuilds | tail -n +2 | xargs -I{} rm -fr "/tmp/_zBuilds/{}"; mkdir -p ${{env.workSpace}}; df -P tmp' 
+
+    - name: Git clone on zOS USS
+      shell: powershell
+
+      ## sample running non-SSH connection with ZOWE/RSEAPI (untested) see conf/zowe/cli for install
+      ## zowe rse issue unix "git clone git@github.com:nlopez59/migtest.git" --cwd "/tmp" --rse-profile "fyre-zos"
+      run:   ssh ${{inputs.zOS}} '${{inputs.zProfile}}; git clone -b ${{github.ref_name}} ${{env.myRepoURL}} ${{env.workSpace}}/${{env.appDirName}}'
+
+    - name: Git clone Common repository
+      if: ${{ env.CommonURL != '' }}
+      shell: powershell
+      run: |
+        # Clone the shared Common repository only when Common is defined and under the main repo`s root folder
+        ssh ${{ inputs.zOS }} '${{ inputs.zProfile }}; git clone -b feature/v1.0.1/new-folder-structure ${{ env.CommonURL }} ${{env.workSpace}}/${{env.appDirName}}/shared-copybook'
+
+
+
+    - name: Get Git Commit ID to version a package
+      shell: powershell
+      run: |
+         $short = $env:GITHUB_SHA.Substring(0, 7)
+         "ART_VER=1.0.$short" >> $env:GITHUB_ENV
+         Write-Host "ART_VER=1.0.$short"
+
+      ## For ADMIN Only.  This steps refreshes/initializes the DBB/WD config files for testing purposes.  Normal application build will not 
+      ## have this step. 
+    - name: Refresh zDevOps test scripts from the clone of the Admin repo
+      shell: powershell
+      run:   ssh ${{inputs.zOS}} 'mkdir -p ${{inputs.zDO}}; cd ${{env.workSpace}}/${{env.appDirName}}/conf; cp -r build deploy scripts ${{inputs.zDO}}; chmod +x ${{inputs.zDO}}/scripts/*.sh; chmod +x ${{inputs.zDO}}/build/*.sh; ls -lasT ${{inputs.zDO}}'
+
+    - name: zBuild/Package/Publish (IBM DBB 3.0.5)
+      shell: powershell      
+      run: ssh ${{inputs.zOS}} '${{inputs.zProfile}}; cd ${{env.workSpace}}/${{env.appDirName}}; dbb -DBB_DAEMON_PORT 8180  build pipeline --verbose --artf conf/build/jfrogPat --release-id ReleaseID_tag123 --build-id BuildID_${{github.run_number}}-${{env.ART_VER}} --hlq ibmuser.zbuilder' 
+   
+    - name: Prep the DBB BuildList for IBM zCodeScan
+      shell: powershell
+      run:   ssh ${{inputs.zOS}} '${{inputs.zProfile}}; cd ${{env.workSpace}}/${{env.appDirName}}; iconv -f IBM-1047 -t UTF-8 ${{env.workSpace}}/${{env.appDirName}}/logs/buildList.txt > ${{env.workSpace}}/${{env.appDirName}}/logs/buildList_utf8.txt' 
+
+    - name: Stage the DBB BuildList
+      shell: powershell
+      run:   scp ${{inputs.zOS}}:${{env.workSpace}}/${{env.appDirName}}/logs/buildList_utf8.txt ${{env.jobLogs}}
+
+    - name: Save all logs
+      shell: powershell
+      if:    always()
+      run:   scp ${{inputs.zOS}}:${{env.workSpace}}/${{env.appDirName}}/logs/*.log ${{env.jobLogs}}
+
+    ## END OF MAIN DEMO ABOVE with Artifactory
+    ## 
+
+
+
+
+
+    ## Start of new demo for GH Release 
+    # Extra step to demonstrate how to package artifact for script upload (GH Release model beta 1)
+    # 1. Package artifacts on z/OS USS
+    - name: Extra-Demo-Step_Package DBB Artifacts in GitHub Release for Wazi Deploy 
+      shell: powershell
+      run: |
+        ssh ${{inputs.zOS}} '${{inputs.zProfile}}; cd ${{env.workSpace}}/${{env.appDirName}}; mkdir -p packDir; python ${{inputs.zDO}}/scripts/dbb_prepare_local_folder.py -br logs/BuildReport.json -wf packDir; tar -cvf package.tar -C packDir .'
+
+    # 2. NEW: Copy package.tar from z/OS USS down to the GitHub runner workspace
+    - name: Download package.tar from z/OS
+      shell: powershell
+      run: |
+        # Create a local directory on the runner matching what the release step expects
+        New-Item -ItemType Directory -Force -Path "build-output"
+        
+        # Use scp to pull the file down (assumes ssh/scp credentials or agent are configured)
+        scp ${{inputs.zOS}}:${{env.workSpace}}/${{env.appDirName}}/package.tar ./build-output/package.tar
+
+    # 3. Generate Release Tag
+    - name: Generate Release Tag
+      id: create_tag
+      shell: powershell
+      run: |
+        $TAG = "v1.0.${{ github.run_number }}"
+        "tag=$TAG" >> $env:GITHUB_OUTPUT
+        Write-Host "Release tag: $TAG"
+
+    # 4. Publish GitHub Release (Now finds the file in build-output/)
+    - name: Publish GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.create_tag.outputs.tag }}
+        name: "z/OS Application ${{ steps.create_tag.outputs.tag }}"
+
+        body: |
+          Automated z/OS DBB build artifact.
+
+          Application: zos-application
+          Version: ${{ steps.create_tag.outputs.tag }}
+          Commit: ${{ github.sha }}
+          Build: ${{ github.run_number }}
+
+        files: |
+          build-output/package.tar
+
+        draft: false
+        prerelease: false
+
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
